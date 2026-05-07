@@ -1,0 +1,85 @@
+Suggested Tuning Filters
+
+Add these only after testing. Do not suppress too early.
+
+| where NOT (
+    like(lower(coalesce(process,"")),"%wireshark.exe%")
+    AND user IN ("DOMAIN\\approved_admin_1", "DOMAIN\\approved_network_engineer")
+)
+
+| where NOT (
+    like(lower(coalesce(command_line,"")),"%netsh trace start%")
+    AND like(lower(coalesce(parent_process,"")),"%sccm%")
+)
+
+| where NOT (
+    like(lower(coalesce(process,"")),"%dumpcap.exe%")
+    AND like(lower(coalesce(parent_process,"")),"%wireshark.exe%")
+    AND user IN ("DOMAIN\\approved_network_engineer")
+)
+
+
+Higher-Fidelity Follow-Up Hunt (Use a window like 15 minutes before to 30 minutes after the detection hit.)
+
+After the baseline fires, pivot into surrounding activity:
+
+index=YOUR_INDEX_HERE host="HOST_FROM_ALERT"
+earliest="YYYY-MM-DD HH:MM:SS" latest="YYYY-MM-DD HH:MM:SS"
+(
+    "netsh trace"
+    OR "pktmon"
+    OR "pcap"
+    OR "pcapng"
+    OR "npcap"
+    OR "winpcap"
+    OR "tshark"
+    OR "dumpcap"
+    OR "wireshark"
+    OR "tcpdump"
+    OR "windump"
+    OR "rawcap"
+)
+| table _time sourcetype EventCode host user Image ParentImage CommandLine Message
+| sort _time
+
+
+Recommended Alert Metadata
+
+name: Windows Endpoint Network Sniffing Activity
+id: custom_t1040_windows_network_sniffing_v1
+mitre_attack:
+  tactic:
+    - Credential Access
+    - Discovery
+  technique:
+    - T1040 Network Sniffing
+severity: Medium
+confidence: Medium
+data_sources:
+  - Sysmon Event ID 1 Process Creation
+  - Sysmon Event ID 6 Driver Loaded
+  - Sysmon Event ID 7 Image Loaded
+  - Sysmon Event ID 11 File Create
+  - Windows Security 4688 Process Creation
+  - Windows System 7045 Service Creation
+  - PowerShell 4104 Script Block Logging
+false_positives:
+  - Network engineering packet captures
+  - SOC / IR troubleshooting
+  - Approved Wireshark / Npcap installations
+  - SCCM or IT diagnostic collection
+response:
+  - Validate user and host role
+  - Confirm whether packet capture was authorized
+  - Identify capture output files
+  - Review parent process and execution chain
+  - Pivot for credential access, name-resolution poisoning, SMB relay, and lateral movement
+
+
+Start with this as a medium-severity baseline alert. Do not make it high globally yet.
+
+Promote to high when:
+non-admin user + native capture command
+OR unknown host + packet capture tool
+OR capture activity + .pcap/.pcapng artifact
+OR sniffing tool execution + lateral movement / credential access proximity
