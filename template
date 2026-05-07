@@ -1,0 +1,172 @@
+(
+    index=YOUR_INDEX_HERE
+    (
+        (sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode IN (1,6,7,11))
+        OR (sourcetype="WinEventLog:Security" EventCode=4688)
+        OR (sourcetype="WinEventLog:System" EventCode=7045)
+        OR (sourcetype="WinEventLog:Microsoft-Windows-PowerShell/Operational" EventCode=4104)
+        OR (sourcetype="powershell:transcription")
+    )
+    (
+        wireshark OR tshark OR dumpcap OR tcpdump OR windump OR rawcap OR pktmon OR netsh OR netmon OR nmcap
+        OR npcap OR winpcap OR "packet.dll" OR "wpcap.dll" OR sharppcap OR pcapdotnet
+        OR "New-NetEventSession" OR "Add-NetEventProvider" OR "Start-NetEventSession"
+        OR "netsh trace" OR "pktmon start" OR ".pcap" OR ".pcapng" OR "promiscuous"
+    )
+)
+
+| eval host=coalesce(Computer, host, dest, dvc)
+| eval user=coalesce(User, user, Account_Name, SubjectUserName, TargetUserName)
+| eval user=if(isnull(user) OR user="" OR user="NOT_TRANSLATED", "UNKNOWN_OR_SYSTEM", user)
+
+| eval process=coalesce(Image, New_Process_Name, ProcessName, process_path, process)
+| eval parent_process=coalesce(ParentImage, Parent_Process_Name, parent_process, parent_process_name)
+| eval command_line=coalesce(CommandLine, Process_Command_Line, command, Message, ScriptBlockText)
+| eval service_name=coalesce(ServiceName, service_name)
+| eval service_image=coalesce(ServiceFileName, ImagePath, service_path)
+
+| eval evidence=lower(coalesce(command_line, Message, ScriptBlockText, process, service_image, ""))
+| eval process_l=lower(coalesce(process, ""))
+| eval parent_l=lower(coalesce(parent_process, ""))
+| eval service_l=lower(coalesce(service_image, ""))
+
+| eval has_capture_tool=if(
+    like(process_l,"%wireshark.exe%")
+    OR like(process_l,"%tshark.exe%")
+    OR like(process_l,"%dumpcap.exe%")
+    OR like(process_l,"%tcpdump.exe%")
+    OR like(process_l,"%windump.exe%")
+    OR like(process_l,"%rawcap.exe%")
+    OR like(process_l,"%netmon.exe%")
+    OR like(process_l,"%nmcap.exe%")
+    OR like(evidence,"%wireshark%")
+    OR like(evidence,"%tshark%")
+    OR like(evidence,"%dumpcap%")
+    OR like(evidence,"%tcpdump%")
+    OR like(evidence,"%windump%")
+    OR like(evidence,"%rawcap%")
+    OR like(evidence,"%nmcap%"),
+    1, 0
+)
+
+| eval has_windows_native_capture=if(
+    like(evidence,"%netsh trace start%")
+    OR like(evidence,"%pktmon start%")
+    OR like(evidence,"%pktmon filter add%")
+    OR like(evidence,"%pktmon pcapng%")
+    OR like(evidence,"%new-neteventsession%")
+    OR like(evidence,"%add-neteventprovider%")
+    OR like(evidence,"%start-neteventsession%"),
+    1, 0
+)
+
+| eval has_pcap_driver_or_library=if(
+    like(evidence,"%npcap%")
+    OR like(evidence,"%winpcap%")
+    OR like(evidence,"%packet.dll%")
+    OR like(evidence,"%wpcap.dll%")
+    OR like(evidence,"%sharppcap%")
+    OR like(evidence,"%pcapdotnet%")
+    OR like(service_l,"%npcap%")
+    OR like(service_l,"%winpcap%")
+    OR like(service_l,"%packet.dll%")
+    OR like(service_l,"%wpcap.dll%"),
+    1, 0
+)
+
+| eval has_packet_capture_output=if(
+    like(evidence,"%.pcap%")
+    OR like(evidence,"%.pcapng%")
+    OR like(evidence,"%capture file%")
+    OR like(evidence,"%packet capture%"),
+    1, 0
+)
+
+| eval has_promisc_reference=if(
+    like(evidence,"%promiscuous%")
+    OR like(evidence,"%promisc%"),
+    1, 0
+)
+
+| eval detection_type=mvappend(
+    if(has_capture_tool=1, "Known packet capture/sniffing tool execution", null()),
+    if(has_windows_native_capture=1, "Windows-native packet capture command", null()),
+    if(has_pcap_driver_or_library=1, "Packet capture driver/library reference", null()),
+    if(has_packet_capture_output=1, "Packet capture file/output reference", null()),
+    if(has_promisc_reference=1, "Promiscuous mode reference", null())
+)
+
+| eval indicator=mvappend(
+    if(has_capture_tool=1, "tool_name_or_capture_binary", null()),
+    if(has_windows_native_capture=1, "native_windows_capture_command", null()),
+    if(has_pcap_driver_or_library=1, "pcap_driver_or_library", null()),
+    if(has_packet_capture_output=1, "pcap_or_pcapng_output", null()),
+    if(has_promisc_reference=1, "promiscuous_mode_string", null())
+)
+
+| eval matched_detection_logic=mvappend(
+    if(has_capture_tool=1, "process/evidence matched known packet capture tooling: wireshark, tshark, dumpcap, tcpdump, windump, rawcap, netmon, nmcap", null()),
+    if(has_windows_native_capture=1, "command line matched native Windows capture behavior: netsh trace, pktmon, or NetEventSession", null()),
+    if(has_pcap_driver_or_library=1, "event referenced packet capture driver/library: Npcap, WinPcap, packet.dll, wpcap.dll, SharpPcap, or PcapDotNet", null()),
+    if(has_packet_capture_output=1, "event referenced packet capture output: .pcap, .pcapng, capture file, or packet capture", null()),
+    if(has_promisc_reference=1, "event referenced promiscuous mode or PROMISC behavior", null())
+)
+
+| eval detection_type=mvfilter(isnotnull(detection_type))
+| eval indicator=mvfilter(isnotnull(indicator))
+| eval matched_detection_logic=mvfilter(isnotnull(matched_detection_logic))
+
+| where mvcount(detection_type)>0
+
+| eval process_key=coalesce(process, service_image, "UNKNOWN_PROCESS")
+| eval command_key=coalesce(command_line, service_image, Message, ScriptBlockText, "UNKNOWN_COMMAND")
+| eval process_id=coalesce(ProcessId, Process_ID, New_Process_ID, process_id)
+| eval process_guid=coalesce(ProcessGuid, process_guid)
+
+| stats earliest(_time) as first_seen
+        latest(_time) as last_seen
+        count as event_count
+        values(EventCode) as event_codes
+        values(sourcetype) as sourcetypes
+        values(detection_type) as detection_types
+        values(indicator) as indicators
+        values(matched_detection_logic) as matched_detection_logic
+        values(process) as process
+        values(parent_process) as parent_process
+        values(command_line) as command_line
+        values(service_name) as service_name
+        values(service_image) as service_image
+        values(process_id) as process_ids
+        values(process_guid) as process_guids
+  by host user process_key command_key
+
+| eval first_seen_utc=strftime(first_seen, "%Y-%m-%d %H:%M:%S UTC")
+| eval last_seen_utc=strftime(last_seen, "%Y-%m-%d %H:%M:%S UTC")
+
+| eval severity=case(
+    mvfind(detection_types, "Windows-native packet capture command")>=0 AND user!="UNKNOWN_OR_SYSTEM", "high",
+    mvfind(detection_types, "Known packet capture/sniffing tool execution")>=0 AND user!="UNKNOWN_OR_SYSTEM", "medium",
+    mvfind(detection_types, "Packet capture driver/library reference")>=0, "medium",
+    true(), "low"
+)
+
+| table first_seen_utc
+        last_seen_utc
+        severity
+        host
+        user
+        matched_detection_logic
+        detection_types
+        indicators
+        event_count
+        event_codes
+        sourcetypes
+        process
+        parent_process
+        command_line
+        service_name
+        service_image
+        process_ids
+        process_guids
+
+| sort - first_seen_utc
