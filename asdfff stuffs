@@ -1,0 +1,126 @@
+Sysmon process creation search
+
+index=<your_index> sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1 host=<HOSTNAME>
+| eval cmd_l=lower(coalesce(CommandLine, Process_Command_Line, ""))
+| eval image_l=lower(coalesce(Image, Process_Name, NewProcessName, ""))
+| eval parent_l=lower(coalesce(ParentImage, ParentProcessName, ""))
+| where match(cmd_l, "(?i)\bwhoami\b")
+    OR match(cmd_l, "(?i)\bcmd\.exe\s+/c\s+whoami\b")
+    OR match(cmd_l, "(?i)\bipconfig(\.exe)?\s+/all\b")
+    OR match(cmd_l, "(?i)\bnetsh(\.exe)?\s+interface\s+show\b")
+    OR match(cmd_l, "(?i)\barp(\.exe)?\s+-a\b")
+    OR match(cmd_l, "(?i)\bnet(\.exe)?\s+config\b")
+    OR match(cmd_l, "(?i)\bwmic(\.exe)?\s+useraccount\s+get\s+/all\b")
+    OR match(cmd_l, "(?i)\bsysteminfo(\.exe)?\b")
+    OR match(cmd_l, "(?i)\breg(\.exe)?\s+query\s+hklm\\system\\currentcontrolset\\services\\disk\\enum\b")
+    OR match(cmd_l, "(?i)\bprintscr\b.*--window\s+desktop")
+    OR match(cmd_l, "(?i)\bloader\b.*--load\s+run")
+    OR match(cmd_l, "(?i)\bloader\b.*--load\s+printscr")
+    OR match(cmd_l, "(?i)\bcontroller\b.*--shutdown")
+| eval matched_step=case(
+    match(cmd_l, "(?i)\bwhoami\b"), "whoami",
+    match(cmd_l, "(?i)\bcmd\.exe\s+/c\s+whoami\b"), "cmd /c whoami",
+    match(cmd_l, "(?i)\bipconfig(\.exe)?\s+/all\b"), "ipconfig /all",
+    match(cmd_l, "(?i)\bnetsh(\.exe)?\s+interface\s+show\b"), "netsh interface show",
+    match(cmd_l, "(?i)\barp(\.exe)?\s+-a\b"), "arp -a",
+    match(cmd_l, "(?i)\bnet(\.exe)?\s+config\b"), "net config",
+    match(cmd_l, "(?i)\bwmic(\.exe)?\s+useraccount\s+get\s+/all\b"), "wmic useraccount get /ALL",
+    match(cmd_l, "(?i)\bsysteminfo(\.exe)?\b"), "systeminfo",
+    match(cmd_l, "(?i)\breg(\.exe)?\s+query\s+hklm\\system\\currentcontrolset\\services\\disk\\enum\b"), "reg query Disk Enum",
+    match(cmd_l, "(?i)\bprintscr\b.*--window\s+desktop"), "printscr screen capture",
+    match(cmd_l, "(?i)\bloader\b.*--load\s+run"), "loader --load run",
+    match(cmd_l, "(?i)\bloader\b.*--load\s+printscr"), "loader --load printscr",
+    match(cmd_l, "(?i)\bcontroller\b.*--shutdown"), "controller --shutdown"
+)
+| table _time host User matched_step Image ParentImage CommandLine ProcessId ParentProcessId CurrentDirectory
+| sort _time
+
+
+
+
+
+Windows Security 4688 fallback
+index=<your_index> sourcetype="WinEventLog:Security" EventCode=4688 host=<HOSTNAME>
+| eval cmd_l=lower(coalesce(Process_Command_Line, CommandLine, ""))
+| eval image_l=lower(coalesce(New_Process_Name, NewProcessName, Process_Name, ""))
+| eval parent_l=lower(coalesce(Creator_Process_Name, ParentProcessName, ParentImage, ""))
+| where match(cmd_l, "(?i)\bwhoami\b")
+    OR match(cmd_l, "(?i)\bcmd\.exe\s+/c\s+whoami\b")
+    OR match(cmd_l, "(?i)\bipconfig(\.exe)?\s+/all\b")
+    OR match(cmd_l, "(?i)\bnetsh(\.exe)?\s+interface\s+show\b")
+    OR match(cmd_l, "(?i)\barp(\.exe)?\s+-a\b")
+    OR match(cmd_l, "(?i)\bnet(\.exe)?\s+config\b")
+    OR match(cmd_l, "(?i)\bwmic(\.exe)?\s+useraccount\s+get\s+/all\b")
+    OR match(cmd_l, "(?i)\bsysteminfo(\.exe)?\b")
+    OR match(cmd_l, "(?i)\breg(\.exe)?\s+query\s+hklm\\system\\currentcontrolset\\services\\disk\\enum\b")
+| eval matched_step=case(
+    match(cmd_l, "(?i)\bwhoami\b"), "whoami",
+    match(cmd_l, "(?i)\bcmd\.exe\s+/c\s+whoami\b"), "cmd /c whoami",
+    match(cmd_l, "(?i)\bipconfig(\.exe)?\s+/all\b"), "ipconfig /all",
+    match(cmd_l, "(?i)\bnetsh(\.exe)?\s+interface\s+show\b"), "netsh interface show",
+    match(cmd_l, "(?i)\barp(\.exe)?\s+-a\b"), "arp -a",
+    match(cmd_l, "(?i)\bnet(\.exe)?\s+config\b"), "net config",
+    match(cmd_l, "(?i)\bwmic(\.exe)?\s+useraccount\s+get\s+/all\b"), "wmic useraccount get /ALL",
+    match(cmd_l, "(?i)\bsysteminfo(\.exe)?\b"), "systeminfo",
+    match(cmd_l, "(?i)\breg(\.exe)?\s+query\s+hklm\\system\\currentcontrolset\\services\\disk\\enum\b"), "reg query Disk Enum"
+)
+| table _time host Account_Name SubjectUserName matched_step New_Process_Name Creator_Process_Name Process_Command_Line New_Process_ID Creator_Process_ID
+| sort _time
+
+
+Broader search across all Windows/Sysmon process logs
+index=<your_index> host=<HOSTNAME>
+(
+    "whoami" OR "ipconfig" OR "netsh" OR "arp -a" OR "net config" OR "wmic useraccount" OR "systeminfo" OR "Disk\\Enum" OR "printscr" OR "loader --load" OR "controller --shutdown"
+)
+| eval cmd=coalesce(CommandLine, Process_Command_Line, command, Message, "")
+| eval cmd_l=lower(cmd)
+| where match(cmd_l, "(?i)\bwhoami\b")
+    OR match(cmd_l, "(?i)\bipconfig(\.exe)?\s+/all\b")
+    OR match(cmd_l, "(?i)\bnetsh(\.exe)?\s+interface\s+show\b")
+    OR match(cmd_l, "(?i)\barp(\.exe)?\s+-a\b")
+    OR match(cmd_l, "(?i)\bnet(\.exe)?\s+config\b")
+    OR match(cmd_l, "(?i)\bwmic(\.exe)?\s+useraccount\s+get\s+/all\b")
+    OR match(cmd_l, "(?i)\bsysteminfo(\.exe)?\b")
+    OR match(cmd_l, "(?i)disk\\enum")
+    OR match(cmd_l, "(?i)\bprintscr\b")
+    OR match(cmd_l, "(?i)\bloader\b.*--load")
+    OR match(cmd_l, "(?i)\bcontroller\b.*--shutdown")
+| table _time index sourcetype host source EventCode Image New_Process_Name ParentImage Creator_Process_Name User Account_Name cmd
+| sort _time
+
+
+Summarize the test execution by host/user
+index=<your_index> sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1 host=<HOSTNAME>
+| eval cmd_l=lower(coalesce(CommandLine, ""))
+| eval user=coalesce(User, user, Account_Name, SubjectUserName)
+| eval matched_step=case(
+    match(cmd_l, "(?i)\bwhoami\b"), "T1033 - whoami",
+    match(cmd_l, "(?i)\bipconfig(\.exe)?\s+/all\b"), "T1016 - ipconfig /all",
+    match(cmd_l, "(?i)\bnetsh(\.exe)?\s+interface\s+show\b"), "T1016 - netsh interface show",
+    match(cmd_l, "(?i)\barp(\.exe)?\s+-a\b"), "T1016 - arp -a",
+    match(cmd_l, "(?i)\bnet(\.exe)?\s+config\b"), "T1016 - net config",
+    match(cmd_l, "(?i)\bwmic(\.exe)?\s+useraccount\s+get\s+/all\b"), "T1033 - wmic useraccount get /ALL",
+    match(cmd_l, "(?i)\bsysteminfo(\.exe)?\b"), "T1082 - systeminfo",
+    match(cmd_l, "(?i)disk\\enum"), "T1082 - reg query Disk Enum",
+    match(cmd_l, "(?i)\bprintscr\b.*--window\s+desktop"), "T1113 - screen capture",
+    match(cmd_l, "(?i)\bloader\b.*--load"), "loader activity",
+    match(cmd_l, "(?i)\bcontroller\b.*--shutdown"), "controller shutdown"
+)
+| where isnotnull(matched_step)
+| stats earliest(_time) as first_seen latest(_time) as last_seen
+        values(matched_step) as matched_steps
+        values(Image) as images
+        values(ParentImage) as parent_images
+        values(CommandLine) as command_lines
+        count as event_count
+  by host user
+| convert ctime(first_seen) ctime(last_seen)
+| sort first_seen
+
+
+Best quick approach
+index=<your_index> host=<HOSTNAME>
+("whoami" OR "ipconfig /all" OR "netsh interface show" OR "arp -a" OR "net config" OR "wmic useraccount" OR "systeminfo" OR "Disk\\Enum")
+| table _time index sourcetype host EventCode User Account_Name Image New_Process_Name ParentImage Creator_Process_Name CommandLine Process_Command_Line Message
+| sort _time
