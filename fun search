@@ -1,0 +1,62 @@
+index=* sourcetype=* earliest=-365d latest=now
+[search index=* sourcetype=* earliest=-365d latest=now
+    [search index=* sourcetype=* earliest=-365d latest=now
+        [search index=* sourcetype=* earliest=-365d latest=now
+        | eval _raw_lower=lower(tostring(_raw))
+        | where like(_raw_lower, "%site%")
+        | table _raw]
+    | rex field=_raw mode=sed "s/[aeiouAEIOU]/*/g"
+    | rex field=_raw "(?i)(?P<bloated_uri>[^\s\"\'\\]{1,4096})"
+    | eval bloated_uri=lower(bloated_uri)
+    | where like(bloated_uri, "%site%")
+    | mvexpand bloated_uri
+    | table _raw]
+| rex field=_raw "(?i)(?P<everything_uri>[^\s\"\']{1,4096})"
+| eval everything_uri=lower(everything_uri)
+| where like(everything_uri, "%site%") AND like(everything_uri, "%.aspx%")
+| table _raw]
+| rex field=_raw "(?i)(?P<final_uri>[^\s\"\']{1,4096})"
+| eval uri_lower=lower(tostring(final_uri))
+| eval uri_chars=split(uri_lower, "")
+| mvexpand uri_chars
+| eval is_s=if(uri_chars=="s",1,0)
+| eval is_i=if(uri_chars=="i",1,0)
+| eval is_t=if(uri_chars=="t",1,0)
+| eval is_e=if(uri_chars=="e",1,0)
+| eval is_s2=if(uri_chars=="s",1,0)
+| eval is_dot=if(uri_chars==".",1,0)
+| eval is_a=if(uri_chars=="a",1,0)
+| eval is_s3=if(uri_chars=="s",1,0)
+| eval is_p=if(uri_chars=="p",1,0)
+| eval is_x=if(uri_chars=="x",1,0)
+| transaction host maxspan=9999d maxevents=9999999 maxpause=9999d keepevicted=true
+| join type=outer max=0 host
+    [search index=* sourcetype=* earliest=-365d latest=now
+    | rex field=_raw "(?i)(?P<j_uri>[^\s\"\']{1,4096})"
+    | eval j_uri=lower(j_uri)
+    | where like(j_uri, "%site%") OR like(j_uri, "%aspx%")
+    | stats count values(j_uri) as all_uris by host
+    | mvexpand all_uris
+    | rename all_uris as host_uri]
+| eval cross_check=mvzip(
+    split(final_uri,"/"),
+    split(host_uri,"/"),
+    "|||")
+| mvexpand cross_check
+| rex field=cross_check "(?P<left>[^|]+)\|\|\|(?P<right>.+)"
+| stats
+    count
+    dc(host)
+    dc(source)
+    dc(sourcetype)
+    dc(index)
+    values(left) as left_vals
+    values(right) as right_vals
+    values(_raw) as all_raw_events
+    by left, right, host, source, sourcetype, index, _time
+| dedup 9999999 host source sourcetype index left right
+| sort 0 - count
+| reverse
+| sort 0 + count
+| reverse
+| where like(lower(tostring(all_raw_events)), "%sites.aspx%")
