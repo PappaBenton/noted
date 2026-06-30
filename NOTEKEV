@@ -1,0 +1,385 @@
+# KEV-to-Sigma Rule Generator: Reusable Prompt Template
+
+## Purpose
+This prompt allows you to paste CISA KEV JSON data into Claude and get back a templated Sigma 2.0 YAML rule ready for sigconverter.io conversion.
+
+---
+
+## The Master Prompt
+
+Copy this entire prompt and use it with Claude (or any LLM). Replace the `[KEV JSON HERE]` section with actual CISA KEV entries from:
+`https://github.com/cisagov/kev-data/blob/develop/known_exploited_vulnerabilities.json`
+
+---
+
+### **PROMPT START**
+
+```
+You are a detection engineer specializing in threat hunting and SIEM detection rules.
+
+Your task: Convert CISA Known Exploited Vulnerability (KEV) data into a Sigma 2.0 detection rule YAML file.
+
+CONTEXT:
+- Input: CISA KEV JSON entry (from known_exploited_vulnerabilities.json)
+- Output: Valid Sigma 2.0 YAML rule that can be pasted into sigconverter.io
+- Purpose: Create a threat hunting rule that detects exploitation or post-exploitation indicators
+
+CRITICAL CONSTRAINTS:
+1. Output ONLY valid Sigma 2.0 YAML (no preamble, no markdown code fence)
+2. Follow Sigma 2.0 syntax exactly
+3. Rule must be for log-based detection (Windows events, network logs, web access logs, etc.)
+4. If vulnerability is client-side only (browser UAF, GPU memory corruption), create a THREAT HUNTING rule detecting post-exploitation activity, NOT the exploit itself
+5. Include at least 3 references: NVD, CISA KEV link, and technical advisory
+6. Map to MITRE ATT&CK technique (use T-codes in tags)
+7. Mark status as "experimental" (no production claims without lab validation)
+
+RULE GENERATION RULES:
+- title: Descriptive, includes CVE ID and product
+- logsource: Must be realistic (process_creation, web_access, network_connection, etc.)
+- detection.selection: Field-based detection logic (use realistic field names for the log type)
+- detection.condition: Simple boolean logic (usually just "selection" or "selection and not filter")
+- tags: Must include attack.impact or attack.execution, MITRE T-code, and cve reference
+- level: high or critical based on CVSS/KEV status
+- falsepositives: Acknowledge real FP sources (legitimate tools, admin activity, etc.)
+
+SPECIAL HANDLING:
+- If no log source is obvious: Use "detection.threat_hunting" category and mark as broad hunting
+- If vulnerability affects multiple products: Create rule for primary product first, note in description
+- If privilege escalation: Include process_creation + detection of suspicious child processes
+- If RCE/code execution: Look for web_access (HTTP POST), process_creation (child processes)
+- If authentication bypass: Look for web_access (401→200 transition), registry (disabled auth)
+- If file write/traversal: Look for file_event (creation, modification in unusual paths)
+
+MITRE ATT&CK MAPPING QUICK REFERENCE:
+- T1190: Exploit Public-Facing Application (CVE exploitation)
+- T1098: Account Manipulation (auth bypass, privesc)
+- T1565: Data Destruction (file write/deletion)
+- T1543: Create or Modify System Process (persistence)
+- T1059: Command and Scripting Interpreter (code execution)
+- T1021: Remote Services (lateral movement)
+
+EXAMPLE OUTPUT (structure only, not actual rule):
+```
+title: "[Product] [Vulnerability Type] - [CVE]"
+id: [Generate UUID v4]
+status: experimental
+description: |
+  Detects exploitation of [product] [vulnerability name].
+  CVE-XXXX-XXXXX allows [attacker] to [impact] via [attack vector].
+  
+logsource:
+  product: [windows|linux|web_application|etc]
+  category: [process_creation|web_access|etc]
+  
+detection:
+  selection:
+    [field]: [value]
+  filter:
+    [field]: [exceptions]
+  condition: selection and not filter
+  
+level: [high|critical]
+status: experimental
+tags:
+  - attack.[tactic]
+  - attack.[technique]
+  - cve.[year].[number]
+  
+falsepositives:
+  - [realistic FP source 1]
+  - [realistic FP source 2]
+  
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-XXXX-XXXXX
+  - https://www.cisa.gov/known-exploited-vulnerabilities-catalog
+  - [Technical advisory URL]
+```
+
+---
+
+WORKFLOW:
+1. Parse the KEV JSON entry below
+2. Identify: CVE ID, product, vulnerability type, attack vector
+3. Determine: Best log source to detect this (see SPECIAL HANDLING)
+4. Generate: Sigma YAML with realistic detection logic
+5. Output: Pure YAML (copy-paste ready for sigconverter.io)
+
+---
+
+KEV JSON DATA:
+[KEV JSON HERE]
+
+---
+
+Generate the Sigma rule now. Output only valid YAML, no additional text.
+```
+
+### **PROMPT END**
+
+---
+
+## How to Use This in Your Workflow
+
+### **Step 1: Get KEV Data**
+```bash
+# Option A: Clone and grep
+git clone https://github.com/cisagov/kev-data.git
+grep -A 15 '"cveID": "CVE-2026-5281"' known_exploited_vulnerabilities.json
+
+# Option B: Browse GitHub directly
+# https://github.com/cisagov/kev-data/blob/develop/known_exploited_vulnerabilities.json
+# Search page for CVE ID, copy JSON object
+```
+
+### **Step 2: Paste into Claude**
+1. Open Claude chat
+2. Paste the master prompt above (keeping `[KEV JSON HERE]` placeholder)
+3. Replace `[KEV JSON HERE]` with actual KEV JSON entry (from step 1)
+4. Submit to Claude
+
+### **Step 3: Copy Output**
+- Claude returns: Valid Sigma 2.0 YAML
+- Copy the YAML output
+
+### **Step 4: Convert to Splunk**
+1. Go to `https://sigconverter.io/`
+2. Paste YAML into "Sigma Rule" input
+3. Select backend: **Splunk**
+4. Select processing pipeline: **splunk** (or sysmon if Windows process detection)
+5. Click Convert
+6. Copy SPL query output
+
+### **Step 5: Deploy to Splunk**
+```spl
+# Paste the SPL into Splunk
+# Test in search first (set earliest=-7d to get 7 days of data)
+# Create scheduled search for continuous monitoring
+```
+
+---
+
+## Real Example: CVE-2026-5281
+
+### **Input (KEV JSON):**
+```json
+{
+    "cveID": "CVE-2026-5281",
+    "vendorProject": "Google",
+    "product": "Dawn",
+    "vulnerabilityName": "Google Dawn Use-After-Free Vulnerability",
+    "dateAdded": "2026-04-01",
+    "shortDescription": "Google Dawn contains an use-after-free vulnerability that could allow a remote attacker who had compromised the renderer process to execute arbitrary code via a crafted HTML page.",
+    "requiredAction": "Apply mitigations per vendor instructions",
+    "dueDate": "2026-04-15",
+    "cwes": ["CWE-416"]
+}
+```
+
+### **Claude Prompt (filled in):**
+```
+[Use master prompt above, replace [KEV JSON HERE] with the JSON above]
+```
+
+### **Expected Output (what Claude returns):**
+```yaml
+title: "Chrome Browser Post-Exploitation Activity Detection - CVE-2026-5281"
+id: 12a34b56-78cd-90ef-ghij-klmnopqrstuv
+status: experimental
+description: |
+  Detects potential post-exploitation activity following Chrome/Chromium sandbox escape.
+  CVE-2026-5281 is a use-after-free vulnerability in Google Dawn (GPU abstraction layer).
+  While the exploit itself (memory corruption) is not directly detectable via SIEM logs,
+  this rule identifies suspicious process behavior after successful sandbox escape.
+
+logsource:
+  product: windows
+  category: process_creation
+
+detection:
+  chrome_parent:
+    ParentImage|endswith:
+      - "\chrome.exe"
+      - "\chromium.exe"
+      - "\msedge.exe"
+  
+  suspicious_execution:
+    Image|endswith:
+      - "cmd.exe"
+      - "powershell.exe"
+      - "systeminfo.exe"
+      - "whoami.exe"
+      - "ipconfig.exe"
+  
+  exclude_legitimate:
+    CommandLine|contains:
+      - "--flag-switches"
+      - "--user-data-dir"
+      - "chrome://flags"
+  
+  condition: chrome_parent and suspicious_execution and not exclude_legitimate
+
+level: high
+tags:
+  - attack.impact
+  - attack.t1190
+  - cve.2026.5281
+  - threat_hunting.browser_escape
+
+falsepositives:
+  - Extensions or legitimate tools spawning processes from Chrome
+  - System tools launched via Chrome protocol handlers
+  - Troubleshooting scripts run by users within browser context
+
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-5281
+  - https://www.cisa.gov/known-exploited-vulnerabilities-catalog
+  - https://chromereleases.googleblog.com/2026/03/stable-channel-update-for-desktop_31.html
+  - https://github.com/TheMalwareGuardian/CVE-2026-5281
+```
+
+### **Then in sigconverter.io:**
+1. Paste that YAML
+2. Select "Splunk" backend
+3. Get SPL output like:
+```spl
+(ParentImage="*\\chrome.exe" OR ParentImage="*\\chromium.exe" OR ParentImage="*\\msedge.exe") 
+(Image="*cmd.exe" OR Image="*powershell.exe" OR Image="*systeminfo.exe" OR Image="*whoami.exe" OR Image="*ipconfig.exe") 
+NOT (CommandLine="*--flag-switches*" OR CommandLine="*--user-data-dir*" OR CommandLine="*chrome://flags*")
+```
+
+---
+
+## Template Customization Tips
+
+### **If you want to adjust the prompt for your environment:**
+
+**For Splunk-specific detection (Windows):**
+Replace the example output structure with:
+```yaml
+logsource:
+  product: windows
+  service: sysmon
+  # This tells sigconverter to assume Sysmon field names
+```
+
+**For web application detection (CVE exploiting web apps):**
+```yaml
+logsource:
+  product: web_application
+  category: web_access
+detection:
+  selection:
+    uri|contains: "/vulnerable/endpoint"
+    status: 200
+    method: POST
+```
+
+**For network-based detection:**
+```yaml
+logsource:
+  product: zeek  # or suricata, or firewall
+  category: network_connection
+```
+
+**To add false positive filtering:**
+```yaml
+detection:
+  selection:
+    [main detection logic]
+  filter_internal_ips:
+    src_ip:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+  condition: selection and not filter_internal_ips
+```
+
+---
+
+## Batch Processing Multiple CVEs (Python Workflow)
+
+If you want to automate this:
+
+```python
+#!/usr/bin/env python3
+import json
+import requests
+
+# Read KEV JSON
+response = requests.get("https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json")
+kev_data = response.json()
+
+# Filter to recent KEVs only
+recent_kevs = [v for v in kev_data['vulnerabilities'] if v['dateAdded'] > '2026-03-01']
+
+# For each KEV, construct prompt
+for vuln in recent_kevs[:5]:  # Limit to 5 for testing
+    cve_id = vuln['cveID']
+    kev_json = json.dumps(vuln, indent=2)
+    
+    # Insert KEV data into prompt
+    prompt = f"""[MASTER PROMPT TEXT HERE, with [KEV JSON HERE] replaced by:]
+{kev_json}"""
+    
+    print(f"\n{'='*60}")
+    print(f"Prompt for {cve_id}:")
+    print(prompt)
+    print(f"{'='*60}\n")
+    
+    # TODO: Send to Claude API
+    # response = claude.messages.create(
+    #     model="claude-opus-4-6",
+    #     max_tokens=1500,
+    #     messages=[{"role": "user", "content": prompt}]
+    # )
+    # sigma_yaml = response.content[0].text
+    # Save to file
+```
+
+---
+
+## Quick Reference: Field Names by Log Source
+
+| Log Source | Product | Common Fields | Use Case |
+|-----------|---------|---|---|
+| `process_creation` | windows | ParentImage, Image, CommandLine, TargetFilename | Execution, spawning, file write |
+| `web_access` | web_application | uri, method, status, User-Agent | Web app exploitation |
+| `network_connection` | zeek/suricata | dest_ip, dest_port, protocol | Network pivoting, C2 |
+| `file_event` | windows | TargetFilename, CreationTime, Hashes | Ransomware, webshell upload |
+| `registry_event` | windows | TargetObject, EventType, Details | Persistence, UAC bypass |
+| `image_load` | windows | ImageLoaded, Signed, Signature | DLL injection, living-off-the-land |
+| `dns_query` | zeek | query, record_type, rcode | C2 beaconing, exfil |
+
+---
+
+## Testing Your Generated Rule
+
+**In Splunk, before deploying:**
+
+```spl
+# Test with earliest=-30d (30 days of historical data)
+(ParentImage="*\\chrome.exe") (Image="*cmd.exe") 
+| stats count by _time, ParentImage, Image, CommandLine
+| sort - _time
+
+# Manually review: Are these legitimate or suspicious?
+# Adjust filter conditions based on findings
+```
+
+---
+
+## Deployment Checklist
+
+- [ ] Rule generated from KEV JSON
+- [ ] Converted to SPL via sigconverter.io
+- [ ] Tested in Splunk against historical data (14+ days)
+- [ ] False positives reviewed and filtered
+- [ ] Alert action configured (email, webhook, Slack, ticket)
+- [ ] Scheduled search enabled (recommended: every 5 minutes)
+- [ ] Rule tagged with CVE ID and KEV date
+- [ ] Documented in runbook (who owns, escalation path)
+
+---
+
+## One More Thing: The Pre-Made Prompt for You
+
+Here's the **exact prompt** you can copy/paste into Claude **right now**, ready to use:
