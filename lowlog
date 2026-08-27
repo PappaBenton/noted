@@ -1,0 +1,184 @@
+index=<windows_index>
+    sourcetype="WinEventLog:Microsoft-Windows-PowerShell/Operational"
+    EventCode=4104
+    ( "export-pfxcertificate" OR "export-certificate" OR "exportpfx"
+      OR "X509ContentType" OR "crypto::capi" OR "crypto::certificates" )
+
+``` Message field is not guaranteed depending on TA / XML ingest ```
+| eval msg = replace(coalesce(Message, _raw), "[\r\n]+", " ")
+
+``` Non-greedy with an end-of-string fallback: a truncated or trailer-less
+    event degrades to a partial match instead of being silently dropped ```
+| rex field=msg "Creating Scriptblock text \((?<sb_part>\d+) of (?<sb_total>\d+)\):(?<command_executed>.*?)(?:ScriptBlock ID:\s*(?<scriptblock_id>[0-9A-Fa-f\-]+)|$)"
+| eval command_executed = coalesce(command_executed, msg)
+| where isnotnull(command_executed) AND command_executed != ""
+
+``` Normalize trivial obfuscation before pattern matching.
+    Strips backticks, quotes, carets. Does NOT defeat concatenation or
+    IEX-wrapped encoding - see hunt notes at bottom. ```
+| eval cmd_norm = lower(replace(command_executed, "[`'\"\^]", ""))
+
+``` --------------------------------------------------------------------------
+    Detection vector classification
+    -------------------------------------------------------------------------- ```
+| eval detection_method = case(
+    match(cmd_norm, "crypto::(capi|certificates)"),
+        "Mimikatz: crypto module",
+    match(cmd_norm, "certutil") AND match(cmd_norm, "-?exportpfx"),
+        "CertUtil: -exportPFX",
+    match(cmd_norm, "export-pfxcertificate"),
+        "PowerShell: Export-PfxCertificate",
+    match(cmd_norm, "\.export\(") AND match(cmd_norm, "pfx|pkcs12"),
+        ".NET: X509Certificate2.Export() - PFX",
+    match(cmd_norm, "x509contenttype"),
+        ".NET: X509ContentType reference",
+    match(cmd_norm, "export-certificate"),
+        "PowerShell: Export-Certificate (public key only)",
+    true(),
+        "Certificate Export: Unknown Vector"
+)
+
+``` --------------------------------------------------------------------------
+    Scoring - derived from detection_method so the two can never disagree.
+    Private-key material scores above public-key-only operations.
+    -------------------------------------------------------------------------- ```
+| eval risk_score = case(
+    detection_method=="Mimikatz: crypto module",                        95,
+    detection_method=="CertUtil: -exportPFX",                           90,
+    detection_method=="PowerShell: Export-PfxCertificate",              85,
+    detection_method==".NET: X509Certificate2.Export() - PFX",          85,
+    detection_method==".NET: X509ContentType reference",                75,
+    detection_method=="PowerShell: Export-Certificate (public key only)", 60,
+    true(),                                                             50
+)
+
+``` Escalate if the export is paired with a plaintext password or a
+    write to a network / removable path - strong exfil indicator ```
+| eval risk_score = case(
+    match(cmd_norm, "convertto-securestring.*-asplaintext"), risk_score + 5,
+    match(cmd_norm, "filepath\s*=?\s*\\\\\\\\"),             risk_score + 5,
+    true(), risk_score
+)
+| eval risk_score = min(risk_score, 100)
+
+| eval severity = case(
+    risk_score >= 90, "Critical",
+    risk_score >= 80, "High",
+    risk_score >= 65, "Medium",
+    true(),           "Low"
+)
+
+``` --------------------------------------------------------------------------
+    Identity resolution - User is frequently empty on 4104
+    -------------------------------------------------------------------------- ```
+| eval actor = coalesce(user, User, UserID, "UNRESOLVED")
+
+``` --------------------------------------------------------------------------
+    TUNING - populate from your PKI / cert-automation inventory before enabling
+    Known benign: win-acme, Posh-ACME, IIS renewal, SCCM/Intune, PKI admin hosts
+    -------------------------------------------------------------------------- ```
+``` | search NOT (host IN ("PKI-01","PKI-02") AND actor IN ("SVC_CERTRENEW")) ```
+``` | search NOT match(cmd_norm, "posh-acme|win-acme|wacs\.exe") ```
+
+| fillnull value="N/A" actor scriptblock_id
+| table _time host actor EventCode severity risk_score detection_method
+        scriptblock_id sb_part sb_total command_executed
+| sort 0 -risk_score, -_time
+
+
+``` ============================================================================
+    SEARCH 2 of 2: PowerShell Module / Pipeline Logging (EventCode 4103)
+    Run this SEPARATELY. 4103 has a completely different message structure -
+    it cannot share the 4104 rex. This is the search that recovers the
+    coverage the original query only appeared to have.
+    ============================================================================ ```
+
+index=<windows_index>
+    sourcetype="WinEventLog:Microsoft-Windows-PowerShell/Operational"
+    EventCode=4103
+    ( "Export-PfxCertificate" OR "Export-Certificate" OR "certutil" )
+
+| eval msg = replace(coalesce(Message, _raw), "[\r\n]+", " ")
+
+``` 4103 exposes the resolved cmdlet name and bound parameters directly -
+    this is why it survives aliasing that 4104 string matching can miss ```
+| rex max_match=0 field=msg "CommandInvocation\((?<invoked_command>[^\)]+)\)"
+| rex max_match=0 field=msg "ParameterBinding\([^\)]+\):\s*name=\"(?<param_name>[^\"]+)\";\s*value=\"(?<param_value>[^\"]*)\""
+| rex field=msg "Command Name\s*=\s*(?<command_name>[^\s]+)"
+| rex field=msg "Host Name\s*=\s*(?<ps_host_app>[^\s]+)"
+| rex field=msg "User\s*=\s*(?<ps_user>[^\s]+)"
+| rex field=msg "Command Type\s*=\s*(?<command_type>[^\s]+)"
+
+| where isnotnull(invoked_command) OR isnotnull(command_name)
+
+| eval resolved = lower(coalesce(command_name, mvjoin(invoked_command, ",")))
+| eval detection_method = case(
+    match(resolved, "export-pfxcertificate"), "PowerShell: Export-PfxCertificate (module log)",
+    match(resolved, "export-certificate"),    "PowerShell: Export-Certificate (module log)",
+    match(resolved, "certutil"),              "CertUtil invoked from PowerShell",
+    true(), "Certificate operation - review"
+)
+| eval risk_score = case(
+    match(resolved, "export-pfxcertificate"), 85,
+    match(resolved, "certutil"),              85,
+    match(resolved, "export-certificate"),    60,
+    true(), 50
+)
+| eval severity = case(
+    risk_score >= 80, "High",
+    risk_score >= 65, "Medium",
+    true(), "Low"
+)
+| eval actor = coalesce(ps_user, user, User, "UNRESOLVED")
+
+| fillnull value="N/A"
+| table _time host actor EventCode severity risk_score detection_method
+        command_name command_type ps_host_app param_name param_value
+| sort 0 -risk_score, -_time
+
+
+``` ============================================================================
+    HUNT NOTES - coverage this pair still does NOT provide
+    ============================================================================
+
+    1. certutil.exe run OUTSIDE PowerShell.
+       Requires process-creation telemetry, not the PowerShell log:
+         EventCode=4688 OR (sourcetype=Sysmon EventCode=1)
+         Image="*\\certutil.exe" CommandLine="*exportPFX*"
+       Also cover the store-enumeration precursor: certutil -store my
+
+    2. AD CS abuse (ESC1-ESC8 / Certipy / Certify.exe).
+       Higher-impact T1649 path. Lives in the CA event log:
+         sourcetype="WinEventLog:Security" EventCode IN (4886, 4887, 4899, 4900)
+       Watch for requests where SAN != requesting principal.
+
+    3. PFX/P12 file artifacts on disk.
+         Sysmon EventCode=11 TargetFilename IN ("*.pfx","*.p12")
+       Correlate to the export event by host + 60s window. Catches the
+       .NET Export() path even when the script block itself is obfuscated.
+
+    4. Obfuscation this does not defeat.
+       String concatenation ("Export-Pfx"+"Certificate"), -EncodedCommand,
+       and IEX-wrapped payloads. Add a companion hunt on 4104 for:
+         base64 blobs > 500 chars, FromBase64String, high-entropy strings,
+         and concatenation density (count of "+" adjacent to quoted fragments).
+
+    5. Non-exportable key theft via DPAPI.
+       If the private key is flagged non-exportable, actors pivot to CAPI/CNG
+       key blobs in %APPDATA%\Microsoft\Crypto\* and DPAPI masterkeys.
+       Mimikatz crypto::capi / crypto::cng. Monitor file reads on those paths.
+
+    ============================================================================
+    KNOWN LIMITATION - script block fragmentation
+    ============================================================================
+    A single script logs as N sequential 4104 events ("1 of 3", "2 of 3"...).
+    Because the search filters on the keyword, only the fragment containing
+    the keyword is returned - command_executed may be a partial command.
+    For IR-grade reassembly, take the scriptblock_id from an alert and run:
+
+      index=<windows_index> EventCode=4104 ScriptBlockId="<guid>"
+      | rex field=_raw "Creating Scriptblock text \((?<p>\d+) of (?<t>\d+)\):(?<txt>.*?)ScriptBlock ID:"
+      | sort 0 +p
+      | stats list(txt) as parts by ScriptBlockId
+      | eval full_script = mvjoin(parts, "")
+    ============================================================================ ```
